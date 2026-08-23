@@ -17,8 +17,6 @@ env:
   IAC_REPO: fernanduandrade/heartbeat-iac
   IAC_BRANCH: main
   IAC_APP_PATH: apps/heartbeat-api
-  K8S_NAMESPACE: heartbeat
-  CONTAINER_PORT: "8080"
 
 jobs:
   build-and-deploy:
@@ -72,115 +70,25 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Checkout or initialize IaC repository
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Checkout IaC repository
         env:
           IAC_REPO_TOKEN: ${{ secrets.IAC_REPO_TOKEN }}
         run: |
           git clone "https://x-access-token:${IAC_REPO_TOKEN}@github.com/${IAC_REPO}.git" iac
           cd iac
+          git checkout "$IAC_BRANCH"
 
-          if ! git rev-parse --verify "$IAC_BRANCH" >/dev/null 2>&1; then
-            git checkout --orphan "$IAC_BRANCH"
-            git rm -rf . >/dev/null 2>&1 || true
-          else
-            git checkout "$IAC_BRANCH"
-          fi
-
-      - name: Update Kubernetes manifests
+      - name: Update IaC image tag
         working-directory: iac
         env:
           IMAGE: ${{ steps.meta.outputs.image }}
-          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
         run: |
-          mkdir -p "$IAC_APP_PATH"
-
-          cat > "$IAC_APP_PATH/namespace.yaml" <<EOF
-          apiVersion: v1
-          kind: Namespace
-          metadata:
-            name: ${K8S_NAMESPACE}
-          EOF
-
-          cat > "$IAC_APP_PATH/deployment.yaml" <<EOF
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: ${APP_NAME}
-            namespace: ${K8S_NAMESPACE}
-          spec:
-            replicas: 2
-            selector:
-              matchLabels:
-                app: ${APP_NAME}
-            template:
-              metadata:
-                labels:
-                  app: ${APP_NAME}
-                annotations:
-                  heartbeat-api/image-tag: "${IMAGE_TAG}"
-              spec:
-                containers:
-                  - name: ${APP_NAME}
-                    image: ${IMAGE}
-                    imagePullPolicy: IfNotPresent
-                    ports:
-                      - name: http
-                        containerPort: ${CONTAINER_PORT}
-                    env:
-                      - name: POD_NAME
-                        valueFrom:
-                          fieldRef:
-                            fieldPath: metadata.name
-                      - name: POD_NAMESPACE
-                        valueFrom:
-                          fieldRef:
-                            fieldPath: metadata.namespace
-                      - name: POD_IP
-                        valueFrom:
-                          fieldRef:
-                            fieldPath: status.podIP
-                      - name: NODE_NAME
-                        valueFrom:
-                          fieldRef:
-                            fieldPath: spec.nodeName
-                    readinessProbe:
-                      httpGet:
-                        path: /health/
-                        port: http
-                      initialDelaySeconds: 5
-                      periodSeconds: 10
-                    livenessProbe:
-                      httpGet:
-                        path: /health/
-                        port: http
-                      initialDelaySeconds: 10
-                      periodSeconds: 20
-          EOF
-
-          cat > "$IAC_APP_PATH/service.yaml" <<EOF
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: ${APP_NAME}
-            namespace: ${K8S_NAMESPACE}
-          spec:
-            type: ClusterIP
-            selector:
-              app: ${APP_NAME}
-            ports:
-              - name: http
-                port: 80
-                targetPort: http
-          EOF
-
-          cat > "$IAC_APP_PATH/kustomization.yaml" <<EOF
-          apiVersion: kustomize.config.k8s.io/v1beta1
-          kind: Kustomization
-          resources:
-            - namespace.yaml
-            - deployment.yaml
-            - service.yaml
-          EOF
+          test -f "$IAC_APP_PATH/kustomization.yaml"
+          cd "$IAC_APP_PATH"
+          kustomize edit set image "${APP_NAME}=${IMAGE}"
 
       - name: Commit and push IaC changes
         working-directory: iac
