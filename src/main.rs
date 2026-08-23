@@ -61,6 +61,8 @@ async fn health() -> Json<HealthResponse> {
         pod_ip: env::var("POD_IP").ok(),
         node_name: env::var("NODE_NAME").ok(),
         timestamp: Utc::now(),
+        image_tag: env::var("IMAGE_TAG").ok(),
+
     })
 }
 

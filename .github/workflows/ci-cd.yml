@@ -85,10 +85,12 @@ jobs:
         working-directory: iac
         env:
           IMAGE: ${{ steps.meta.outputs.image }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
         run: |
           test -f "$IAC_APP_PATH/kustomization.yaml"
           cd "$IAC_APP_PATH"
           kustomize edit set image "${APP_NAME}=${IMAGE}"
+          kustomize edit add configmap app-version-cm --from-literal="IMAGE_TAG=${IMAGE_TAG}" --behavior=replace
 
       - name: Commit and push IaC changes
         working-directory: iac
