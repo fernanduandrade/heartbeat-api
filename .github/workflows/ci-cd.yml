@@ -1,0 +1,199 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - Dockerfile
+      - .github/workflows/ci-cd.yml
+  workflow_dispatch:
+
+env:
+  APP_NAME: heartbeat-api
+  IAC_REPO: fernanduandrade/heartbeat-iac
+  IAC_BRANCH: main
+  IAC_APP_PATH: apps/heartbeat-api
+  K8S_NAMESPACE: heartbeat
+  CONTAINER_PORT: "8080"
+
+jobs:
+  build-and-deploy:
+    name: Build, Push And Update IaC
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout application
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Check build
+        run: cargo check --locked
+
+      - name: Compute image metadata
+        id: meta
+        run: |
+          IMAGE_REPOSITORY="${{ secrets.DOCKERHUB_USERNAME }}/${APP_NAME}"
+          IMAGE_TAG="${GITHUB_SHA::7}"
+
+          echo "image_repository=${IMAGE_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ steps.meta.outputs.image_repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Checkout or initialize IaC repository
+        env:
+          IAC_REPO_TOKEN: ${{ secrets.IAC_REPO_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${IAC_REPO_TOKEN}@github.com/${IAC_REPO}.git" iac
+          cd iac
+
+          if ! git rev-parse --verify "$IAC_BRANCH" >/dev/null 2>&1; then
+            git checkout --orphan "$IAC_BRANCH"
+            git rm -rf . >/dev/null 2>&1 || true
+          else
+            git checkout "$IAC_BRANCH"
+          fi
+
+      - name: Update Kubernetes manifests
+        working-directory: iac
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+        run: |
+          mkdir -p "$IAC_APP_PATH"
+
+          cat > "$IAC_APP_PATH/namespace.yaml" <<EOF
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: ${K8S_NAMESPACE}
+          EOF
+
+          cat > "$IAC_APP_PATH/deployment.yaml" <<EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: ${APP_NAME}
+            namespace: ${K8S_NAMESPACE}
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: ${APP_NAME}
+            template:
+              metadata:
+                labels:
+                  app: ${APP_NAME}
+                annotations:
+                  heartbeat-api/image-tag: "${IMAGE_TAG}"
+              spec:
+                containers:
+                  - name: ${APP_NAME}
+                    image: ${IMAGE}
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - name: http
+                        containerPort: ${CONTAINER_PORT}
+                    env:
+                      - name: POD_NAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.name
+                      - name: POD_NAMESPACE
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.namespace
+                      - name: POD_IP
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: status.podIP
+                      - name: NODE_NAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: spec.nodeName
+                    readinessProbe:
+                      httpGet:
+                        path: /health/
+                        port: http
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    livenessProbe:
+                      httpGet:
+                        path: /health/
+                        port: http
+                      initialDelaySeconds: 10
+                      periodSeconds: 20
+          EOF
+
+          cat > "$IAC_APP_PATH/service.yaml" <<EOF
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: ${APP_NAME}
+            namespace: ${K8S_NAMESPACE}
+          spec:
+            type: ClusterIP
+            selector:
+              app: ${APP_NAME}
+            ports:
+              - name: http
+                port: 80
+                targetPort: http
+          EOF
+
+          cat > "$IAC_APP_PATH/kustomization.yaml" <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+            - namespace.yaml
+            - deployment.yaml
+            - service.yaml
+          EOF
+
+      - name: Commit and push IaC changes
+        working-directory: iac
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "$IAC_APP_PATH"
+
+          if git diff --cached --quiet; then
+            echo "No IaC changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: deploy ${APP_NAME} ${GITHUB_SHA::7}"
+          git push origin "$IAC_BRANCH"
