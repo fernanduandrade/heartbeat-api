@@ -212,7 +212,9 @@ dependencies = [
  "chrono",
  "hostname",
  "serde",
+ "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

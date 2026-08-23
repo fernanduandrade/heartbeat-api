@@ -37,8 +37,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Check build
-        run: cargo check --locked
+      - name: Build application
+        run: cargo build --locked
+
+      - name: Test endpoints
+        run: cargo test --locked
 
       - name: Compute image metadata
         id: meta

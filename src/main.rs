@@ -17,6 +17,7 @@ struct HealthResponse {
     pod_ip: Option<String>,
     node_name: Option<String>,
     timestamp: DateTime<Utc>,
+    image_tag: Option<String>,
 }
 
 #[tokio::main]
@@ -33,17 +34,20 @@ async fn main() {
         .parse()
         .expect("PORT must be a valid TCP port");
 
-    let app = Router::new().route("/health/", get(health));
     let listener = TcpListener::bind(addr)
         .await
         .expect("failed to bind TCP listener");
 
     info!(%addr, "starting heartbeat-api");
 
-    axum::serve(listener, app)
+    axum::serve(listener, app())
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server failed");
+}
+
+fn app() -> Router {
+    Router::new().route("/health/", get(health))
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -62,7 +66,6 @@ async fn health() -> Json<HealthResponse> {
         node_name: env::var("NODE_NAME").ok(),
         timestamp: Utc::now(),
         image_tag: env::var("IMAGE_TAG").ok(),
-
     })
 }
 
@@ -87,5 +90,57 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn health_endpoint_returns_healthy_payload() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/health/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(body["status"], json!("healthy"));
+        assert_eq!(body["service"], json!("heartbeat-api"));
+        assert_eq!(body["version"], json!(env!("CARGO_PKG_VERSION")));
+        assert!(body["hostname"].is_string());
+        assert!(body["timestamp"].is_string());
+        assert!(body.as_object().unwrap().contains_key("image_tag"));
+    }
+
+    #[tokio::test]
+    async fn unknown_route_returns_not_found() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/unknown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
